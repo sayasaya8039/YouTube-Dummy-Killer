@@ -1,0 +1,5 @@
+node_modules/
+*.zip
+.vite/
+*.log
+.DS_Store
