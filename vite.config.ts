@@ -39,6 +39,7 @@ export default defineConfig({
   build: {
     outDir: 'YouTube_Dummy_Killer',
     emptyOutDir: true,
+    sourcemap: false,
     rollupOptions: {
       input: {
         popup: resolve(__dirname, 'index.html'),

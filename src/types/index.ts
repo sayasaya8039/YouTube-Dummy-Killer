@@ -48,7 +48,15 @@ export type MessageType =
   | { type: 'SEARCH_VIDEOS'; query: string }
   | { type: 'FIND_ORIGINAL'; currentVideo: VideoInfo }
 
+/** メッセージレスポンスデータ型（Phase 2: 型安全化） */
+export type MessageResponseData =
+  | null
+  | BlockedChannel[]
+  | Settings
+  | VideoInfo[]
+  | VideoInfo
+
 /** レスポンス型 */
 export type MessageResponse =
-  | { success: true; data?: unknown }
+  | { success: true; data?: MessageResponseData }
   | { success: false; error: string }

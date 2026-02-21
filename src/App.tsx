@@ -13,7 +13,9 @@ function App() {
   const [activeTab, setActiveTab] = useState<'main' | 'blocked' | 'settings'>('main')
 
   useEffect(() => {
-    loadData()
+    loadData().catch(() => {
+      // ストレージ読み込みエラー時はデフォルト値を維持
+    })
   }, [])
 
   const loadData = async () => {

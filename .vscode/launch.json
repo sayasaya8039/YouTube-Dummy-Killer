@@ -1,0 +1,42 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Chrome with Extension",
+      "type": "chrome",
+      "request": "launch",
+      "url": "https://www.youtube.com",
+      "runtimeArgs": [
+        "--load-extension=${workspaceFolder}/YouTube_Dummy_Killer",
+        "--auto-open-devtools-for-tabs"
+      ],
+      "webRoot": "${workspaceFolder}",
+      "sourceMaps": true,
+      "sourceMapPathOverrides": {
+        "webpack:///src/*": "${workspaceFolder}/src/*"
+      }
+    },
+    {
+      "name": "Debug Content Script",
+      "type": "chrome",
+      "request": "launch",
+      "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "runtimeArgs": [
+        "--load-extension=${workspaceFolder}/YouTube_Dummy_Killer"
+      ],
+      "webRoot": "${workspaceFolder}",
+      "sourceMaps": true
+    },
+    {
+      "name": "Debug Popup",
+      "type": "chrome",
+      "request": "launch",
+      "url": "chrome-extension://<extension-id>/index.html",
+      "runtimeArgs": [
+        "--load-extension=${workspaceFolder}/YouTube_Dummy_Killer"
+      ],
+      "webRoot": "${workspaceFolder}",
+      "sourceMaps": true
+    }
+  ]
+}

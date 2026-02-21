@@ -1,7 +1,34 @@
 import { findOriginalVideo, getCurrentVideoInfo } from '../lib/youtube-api'
 import { isChannelBlocked, blockChannel, getSettings } from '../lib/storage'
+import { sanitizeUrl, isValidVideoId, formatDate, debounce, delay, el } from '../lib/utils'
 import type { VideoInfo, BlockedChannel } from '../types'
 
+// ========================================
+// Phase 4: DOM セレクタ定数
+// ========================================
+const SELECTORS = {
+  PLAYER_CONTAINER: '#player-container-outer',
+  VIDEO_RENDERERS: 'ytd-compact-video-renderer, ytd-video-renderer, ytd-grid-video-renderer',
+  CHANNEL_LINK: 'a[href*="/channel/"], a[href*="/@"]',
+  OVERLAY_ID: 'yt-dummy-killer-overlay',
+  STYLE_ID: 'yt-dummy-killer-styles',
+} as const
+
+// ========================================
+// Phase 3: 条件付きロガー
+// ========================================
+const DEBUG = false
+
+function log(...args: unknown[]) {
+  if (DEBUG) {
+    // eslint-disable-next-line no-console
+    console.log('[YDK]', ...args)
+  }
+}
+
+// ========================================
+// CSS（変更なし）
+// ========================================
 const STYLES = `
 #yt-dummy-killer-overlay {
   position: fixed;
@@ -107,90 +134,132 @@ const STYLES = `
 .ydk-blocked-container .ydk-actions { flex-direction: row; justify-content: center; }
 `
 
+// ========================================
+// State
+// ========================================
 let currentVideoId: string | null = null
+let lastUrl = location.href
+let lastVideoId: string | null = null
+let blockedChannelIds: Set<string> = new Set()
+let unifiedObserver: MutationObserver | null = null
 
-/**
- * CSSをページにインジェクト
- */
+// ========================================
+// CSSインジェクト
+// ========================================
 function injectStyles() {
-  const styleId = 'yt-dummy-killer-styles'
-  if (document.getElementById(styleId)) return
-
+  if (document.getElementById(SELECTORS.STYLE_ID)) return
   const style = document.createElement('style')
-  style.id = styleId
+  style.id = SELECTORS.STYLE_ID
   style.textContent = STYLES
   document.head.appendChild(style)
 }
 
-/**
- * 初期化
- */
+// ========================================
+// 初期化
+// ========================================
 async function init() {
-  console.log('[YouTube Dummy Killer] Initializing...')
+  log('Initializing...')
   injectStyles()
 
   const settings = await getSettings()
   if (!settings.enabled) {
-    console.log('[YouTube Dummy Killer] Disabled')
+    log('Disabled')
     return
   }
 
-  // URL変更を監視（YouTube SPAのため）
-  observeUrlChanges()
+  await refreshBlockedChannelIds()
+  startUnifiedObserver()
+
+  // YouTube SPA ナビゲーションイベント
+  document.addEventListener('yt-navigate-finish', () => {
+    log('yt-navigate-finish')
+    handleNavigation()
+  })
+  window.addEventListener('popstate', () => {
+    log('popstate')
+    handleNavigation()
+  })
 
   // 初回チェック
   await checkCurrentVideo()
 }
 
-/**
- * URL変更を監視（複数の方法で監視）
- */
-function observeUrlChanges() {
-  let lastUrl = location.href
-  let lastVideoId: string | null = null
+// ========================================
+// Phase 2: ブロック済みチャンネルIDキャッシュ更新
+// ========================================
+async function refreshBlockedChannelIds() {
+  const result = await chrome.storage.local.get('blockedChannels')
+  const channels: BlockedChannel[] = result.blockedChannels || []
+  blockedChannelIds = new Set(channels.map((c) => c.channelId))
+}
 
-  // 方法1: YouTubeのSPAナビゲーションイベントを監視
-  document.addEventListener('yt-navigate-finish', () => {
-    console.log('[YouTube Dummy Killer] yt-navigate-finish detected')
-    const newVideoId = new URLSearchParams(location.search).get('v')
-    if (newVideoId !== lastVideoId) {
-      lastVideoId = newVideoId
-      currentVideoId = null // リセット
-      setTimeout(() => checkCurrentVideo(), 1000)
-    }
-  })
+// ========================================
+// Phase 2: Observer統合（1つに統合 + デバウンス）
+// ========================================
+function startUnifiedObserver() {
+  if (unifiedObserver) unifiedObserver.disconnect()
 
-  // 方法2: popstateイベント（ブラウザの戻る/進む）
-  window.addEventListener('popstate', () => {
-    console.log('[YouTube Dummy Killer] popstate detected')
-    currentVideoId = null
-    setTimeout(() => checkCurrentVideo(), 500)
-  })
-
-  // 方法3: MutationObserver（フォールバック）
-  const observer = new MutationObserver(() => {
+  const debouncedCallback = debounce(() => {
+    // 1. URL変更検知
     if (location.href !== lastUrl) {
       lastUrl = location.href
-      const newVideoId = new URLSearchParams(location.search).get('v')
-      if (newVideoId !== lastVideoId) {
-        lastVideoId = newVideoId
-        currentVideoId = null
-        setTimeout(() => checkCurrentVideo(), 1500)
-      }
+      handleNavigation()
     }
-  })
 
-  observer.observe(document.body, {
+    // 2. ブロック済みチャンネルのフィルタリング
+    filterBlockedChannels()
+  }, 300)
+
+  unifiedObserver = new MutationObserver(debouncedCallback)
+  unifiedObserver.observe(document.body, {
     childList: true,
     subtree: true,
   })
 }
 
-/**
- * 現在の動画をチェック
- */
+// ========================================
+// Phase 2: ページ遷移時の Observer 制御
+// ========================================
+function handleNavigation() {
+  const newVideoId = new URLSearchParams(location.search).get('v')
+  if (newVideoId !== lastVideoId) {
+    lastVideoId = newVideoId
+    currentVideoId = null
+    setTimeout(() => checkCurrentVideo(), 1000)
+  }
+
+  // 動画ページ以外では不要な処理を減らす
+  if (!location.pathname.startsWith('/watch')) {
+    hideOverlay()
+  }
+}
+
+// ========================================
+// ブロック済みチャンネルのフィルタリング
+// ========================================
+function filterBlockedChannels() {
+  if (blockedChannelIds.size === 0) return
+
+  const items = document.querySelectorAll(SELECTORS.VIDEO_RENDERERS)
+  items.forEach((item) => {
+    const channelLink = item.querySelector(SELECTORS.CHANNEL_LINK)
+    if (!channelLink) return
+
+    const href = channelLink.getAttribute('href') || ''
+    const channelId =
+      href.match(/\/channel\/([^/?]+)/)?.[1] ||
+      href.match(/\/@([^/?]+)/)?.[1]
+
+    if (channelId && blockedChannelIds.has(channelId)) {
+      ;(item as HTMLElement).style.display = 'none'
+    }
+  })
+}
+
+// ========================================
+// 動画チェック
+// ========================================
 async function checkCurrentVideo() {
-  // 動画ページかチェック
   if (!location.pathname.startsWith('/watch')) {
     hideOverlay()
     return
@@ -199,147 +268,200 @@ async function checkCurrentVideo() {
   const urlParams = new URLSearchParams(location.search)
   const videoId = urlParams.get('v')
 
-  // 同じ動画なら処理しない
   if (videoId === currentVideoId) return
   currentVideoId = videoId
 
-  console.log('[YouTube Dummy Killer] Checking video:', videoId)
+  log('Checking video:', videoId)
 
-  // 少し待ってからデータを取得（YouTubeのSPA読み込み待ち）
   await delay(1500)
 
   const currentVideo = getCurrentVideoInfo()
   if (!currentVideo) {
-    console.log('[YouTube Dummy Killer] Could not get video info')
+    log('Could not get video info')
     return
   }
 
-  // チャンネルがブロック済みかチェック
-  const isBlocked = await isChannelBlocked(currentVideo.channelId)
-  if (isBlocked) {
-    console.log('[YouTube Dummy Killer] Channel is blocked')
+  const blocked = await isChannelBlocked(currentVideo.channelId)
+  if (blocked) {
+    log('Channel is blocked')
     showBlockedOverlay(currentVideo)
     return
   }
 
-  // オリジナル動画を検索
   const original = await findOriginalVideo(currentVideo)
   if (original) {
-    console.log('[YouTube Dummy Killer] Found potential original:', original)
+    log('Found potential original:', original.videoId)
     showOriginalOverlay(currentVideo, original)
   } else {
-    console.log('[YouTube Dummy Killer] No older video found')
+    log('No older video found')
     hideOverlay()
   }
 }
 
+// ========================================
+// Phase 1: innerHTML廃止 → 安全なDOM構築
+// ========================================
+
 /**
- * オリジナル動画を表示するオーバーレイ
+ * オリジナル動画を表示するオーバーレイ（安全なDOM構築）
  */
 function showOriginalOverlay(current: VideoInfo, original: VideoInfo) {
   hideOverlay()
 
+  // Phase 1: URL安全性検証
+  const videoUrl = isValidVideoId(original.videoId)
+    ? `https://www.youtube.com/watch?v=${original.videoId}`
+    : '#'
+  const thumbUrl = sanitizeUrl(original.thumbnailUrl)
+
   const overlay = document.createElement('div')
-  overlay.id = 'yt-dummy-killer-overlay'
-  overlay.innerHTML = `
-    <div class="ydk-container">
-      <div class="ydk-header">
-        <span class="ydk-icon">&#9888;</span>
-        <span class="ydk-title">パクリ動画の可能性があります</span>
-        <button class="ydk-close" id="ydk-close">&times;</button>
-      </div>
-      <div class="ydk-content">
-        <div class="ydk-section">
-          <div class="ydk-label">オリジナル（推定）</div>
-          <a href="https://www.youtube.com/watch?v=${original.videoId}" class="ydk-video-link">
-            <img src="${original.thumbnailUrl}" class="ydk-thumbnail" alt="">
-            <div class="ydk-video-info">
-              <div class="ydk-video-title">${escapeHtml(original.title)}</div>
-              <div class="ydk-channel">${escapeHtml(original.channelName)}</div>
-              <div class="ydk-date">${formatDate(original.publishedAt)}</div>
-            </div>
-          </a>
-        </div>
-        <div class="ydk-actions">
-          <button class="ydk-btn ydk-btn-primary" id="ydk-goto-original">
-            オリジナルを見る
-          </button>
-          <button class="ydk-btn ydk-btn-danger" id="ydk-block-channel">
-            このチャンネルをブロック
-          </button>
-          <button class="ydk-btn ydk-btn-secondary" id="ydk-dismiss">
-            閉じる
-          </button>
-        </div>
-      </div>
-    </div>
-  `
+  overlay.id = SELECTORS.OVERLAY_ID
 
+  // Container
+  const container = el('div', { class: 'ydk-container' })
+
+  // Header
+  const header = el('div', { class: 'ydk-header' }, [
+    el('span', { class: 'ydk-icon' }, ['\u26A0']),
+    el('span', { class: 'ydk-title' }, ['パクリ動画の可能性があります']),
+  ])
+  const closeBtn = el('button', { class: 'ydk-close' }, ['\u00D7'])
+  closeBtn.addEventListener('click', hideOverlay, { once: true })
+  header.appendChild(closeBtn)
+
+  // Content
+  const content = el('div', { class: 'ydk-content' })
+
+  // Section - Original video info
+  const section = el('div', { class: 'ydk-section' }, [
+    el('div', { class: 'ydk-label' }, ['オリジナル（推定）']),
+  ])
+
+  const videoLink = el('a', { href: videoUrl, class: 'ydk-video-link' })
+  const thumb = document.createElement('img')
+  thumb.className = 'ydk-thumbnail'
+  thumb.alt = ''
+  if (thumbUrl) thumb.src = thumbUrl
+  videoLink.appendChild(thumb)
+
+  const videoInfo = el('div', { class: 'ydk-video-info' }, [
+    el('div', { class: 'ydk-video-title' }, [original.title]),
+    el('div', { class: 'ydk-channel' }, [original.channelName]),
+    el('div', { class: 'ydk-date' }, [formatDate(original.publishedAt)]),
+  ])
+  videoLink.appendChild(videoInfo)
+  section.appendChild(videoLink)
+  content.appendChild(section)
+
+  // Actions
+  const actions = el('div', { class: 'ydk-actions' })
+
+  const gotoBtn = el('button', { class: 'ydk-btn ydk-btn-primary' }, [
+    'オリジナルを見る',
+  ])
+  // Phase 2: { once: true } でリスナー自動解放
+  gotoBtn.addEventListener(
+    'click',
+    () => {
+      if (isValidVideoId(original.videoId)) {
+        window.location.href = `https://www.youtube.com/watch?v=${original.videoId}`
+      }
+    },
+    { once: true },
+  )
+
+  const blockBtn = el('button', { class: 'ydk-btn ydk-btn-danger' }, [
+    'このチャンネルをブロック',
+  ])
+  blockBtn.addEventListener(
+    'click',
+    async () => {
+      const channel: BlockedChannel = {
+        channelId: current.channelId,
+        channelName: current.channelName,
+        blockedAt: new Date(),
+        reason: `パクリ動画: ${current.title}`,
+      }
+      await blockChannel(channel)
+      await refreshBlockedChannelIds()
+      showBlockedOverlay(current)
+    },
+    { once: true },
+  )
+
+  const dismissBtn = el('button', { class: 'ydk-btn ydk-btn-secondary' }, [
+    '閉じる',
+  ])
+  dismissBtn.addEventListener('click', hideOverlay, { once: true })
+
+  actions.appendChild(gotoBtn)
+  actions.appendChild(blockBtn)
+  actions.appendChild(dismissBtn)
+  content.appendChild(actions)
+
+  container.appendChild(header)
+  container.appendChild(content)
+  overlay.appendChild(container)
   document.body.appendChild(overlay)
-
-  // イベントリスナー
-  document.getElementById('ydk-close')?.addEventListener('click', hideOverlay)
-  document.getElementById('ydk-dismiss')?.addEventListener('click', hideOverlay)
-
-  document.getElementById('ydk-goto-original')?.addEventListener('click', () => {
-    window.location.href = `https://www.youtube.com/watch?v=${original.videoId}`
-  })
-
-  document.getElementById('ydk-block-channel')?.addEventListener('click', async () => {
-    const channel: BlockedChannel = {
-      channelId: current.channelId,
-      channelName: current.channelName,
-      blockedAt: new Date(),
-      reason: `パクリ動画: ${current.title}`,
-    }
-    await blockChannel(channel)
-    showBlockedOverlay(current)
-  })
 }
 
 /**
- * ブロック済みチャンネルのオーバーレイ
+ * ブロック済みチャンネルのオーバーレイ（安全なDOM構築）
  */
 function showBlockedOverlay(video: VideoInfo) {
   hideOverlay()
 
   const overlay = document.createElement('div')
-  overlay.id = 'yt-dummy-killer-overlay'
+  overlay.id = SELECTORS.OVERLAY_ID
   overlay.className = 'ydk-blocked'
-  overlay.innerHTML = `
-    <div class="ydk-container ydk-blocked-container">
-      <div class="ydk-header">
-        <span class="ydk-icon">&#128683;</span>
-        <span class="ydk-title">ブロック済みチャンネル</span>
-      </div>
-      <div class="ydk-content">
-        <p>「${escapeHtml(video.channelName)}」はブロックされています。</p>
-        <div class="ydk-actions">
-          <button class="ydk-btn ydk-btn-secondary" id="ydk-go-back">
-            前のページに戻る
-          </button>
-          <button class="ydk-btn ydk-btn-secondary" id="ydk-go-home">
-            ホームに戻る
-          </button>
-        </div>
-      </div>
-    </div>
-  `
 
+  const container = el('div', { class: 'ydk-container ydk-blocked-container' })
+
+  // Header
+  const header = el('div', { class: 'ydk-header' }, [
+    el('span', { class: 'ydk-icon' }, ['\uD83D\uDEAB']),
+    el('span', { class: 'ydk-title' }, ['ブロック済みチャンネル']),
+  ])
+
+  // Content
+  const content = el('div', { class: 'ydk-content' })
+  const message = el('p', {}, [
+    `「${video.channelName}」はブロックされています。`,
+  ])
+  content.appendChild(message)
+
+  // Actions
+  const actions = el('div', { class: 'ydk-actions' })
+
+  const backBtn = el('button', { class: 'ydk-btn ydk-btn-secondary' }, [
+    '前のページに戻る',
+  ])
+  backBtn.addEventListener('click', () => history.back(), { once: true })
+
+  const homeBtn = el('button', { class: 'ydk-btn ydk-btn-secondary' }, [
+    'ホームに戻る',
+  ])
+  homeBtn.addEventListener(
+    'click',
+    () => {
+      window.location.href = 'https://www.youtube.com/'
+    },
+    { once: true },
+  )
+
+  actions.appendChild(backBtn)
+  actions.appendChild(homeBtn)
+  content.appendChild(actions)
+
+  container.appendChild(header)
+  container.appendChild(content)
+  overlay.appendChild(container)
   document.body.appendChild(overlay)
 
-  document.getElementById('ydk-go-back')?.addEventListener('click', () => {
-    history.back()
-  })
-
-  document.getElementById('ydk-go-home')?.addEventListener('click', () => {
-    window.location.href = 'https://www.youtube.com/'
-  })
-
   // 動画プレーヤーを非表示
-  const player = document.querySelector('#player-container-outer')
+  const player = document.querySelector(SELECTORS.PLAYER_CONTAINER)
   if (player) {
-    (player as HTMLElement).style.display = 'none'
+    ;(player as HTMLElement).style.display = 'none'
   }
 }
 
@@ -347,81 +469,18 @@ function showBlockedOverlay(video: VideoInfo) {
  * オーバーレイを非表示
  */
 function hideOverlay() {
-  const overlay = document.getElementById('yt-dummy-killer-overlay')
+  const overlay = document.getElementById(SELECTORS.OVERLAY_ID)
   if (overlay) {
     overlay.remove()
   }
 
-  // 動画プレーヤーを再表示
-  const player = document.querySelector('#player-container-outer')
+  const player = document.querySelector(SELECTORS.PLAYER_CONTAINER)
   if (player) {
-    (player as HTMLElement).style.display = ''
+    ;(player as HTMLElement).style.display = ''
   }
 }
 
-/**
- * HTMLエスケープ
- */
-function escapeHtml(text: string): string {
-  const div = document.createElement('div')
-  div.textContent = text
-  return div.innerHTML
-}
-
-/**
- * 日付フォーマット（文字列でも対応）
- */
-function formatDate(date: Date | string): string {
-  const d = typeof date === 'string' ? new Date(date) : date
-  if (isNaN(d.getTime())) {
-    return '日付不明'
-  }
-  return d.toLocaleDateString('ja-JP', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  })
-}
-
-/**
- * 遅延
- */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-/**
- * おすすめ動画からブロック済みチャンネルを非表示
- */
-async function filterRecommendations() {
-  const blockedChannels = await chrome.storage.local.get('blockedChannels')
-  const blocked = blockedChannels.blockedChannels || []
-  const blockedIds = new Set(blocked.map((c: BlockedChannel) => c.channelId))
-
-  // おすすめ動画のコンテナを監視
-  const recommendObserver = new MutationObserver(() => {
-    const items = document.querySelectorAll('ytd-compact-video-renderer, ytd-video-renderer, ytd-grid-video-renderer')
-
-    items.forEach((item) => {
-      const channelLink = item.querySelector('a[href*="/channel/"], a[href*="/@"]')
-      if (!channelLink) return
-
-      const href = channelLink.getAttribute('href') || ''
-      const channelId = href.match(/\/channel\/([^/?]+)/)?.[1] ||
-                        href.match(/\/@([^/?]+)/)?.[1]
-
-      if (channelId && blockedIds.has(channelId)) {
-        (item as HTMLElement).style.display = 'none'
-      }
-    })
-  })
-
-  recommendObserver.observe(document.body, {
-    childList: true,
-    subtree: true,
-  })
-}
-
+// ========================================
 // 初期化実行
+// ========================================
 init()
-filterRecommendations()

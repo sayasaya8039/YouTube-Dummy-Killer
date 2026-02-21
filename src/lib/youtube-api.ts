@@ -7,18 +7,15 @@ import type { VideoInfo } from '../types'
  */
 
 /**
- * YouTube検索ページからytInitialDataを抽出する正規表現
- * 改善版：JSONの終端を正しく見つける
+ * YouTube検索ページからytInitialDataを抽出
  */
 function extractYtInitialData(html: string): unknown | null {
-  // ytInitialDataの開始位置を見つける
   const startMarker = 'var ytInitialData = '
   const startIndex = html.indexOf(startMarker)
   if (startIndex === -1) return null
 
   const jsonStart = startIndex + startMarker.length
 
-  // JSONの終端を見つける（ネストされたブレースを考慮）
   let depth = 0
   let inString = false
   let escape = false
@@ -50,7 +47,6 @@ function extractYtInitialData(html: string): unknown | null {
           try {
             return JSON.parse(jsonStr)
           } catch {
-            console.error('Failed to parse ytInitialData')
             return null
           }
         }
@@ -78,13 +74,13 @@ export async function searchVideosFromBackground(query: string): Promise<VideoIn
 
     const data = extractYtInitialData(html)
     if (!data) {
-      console.error('ytInitialData not found')
+      // ytInitialData not found
       return []
     }
 
     return parseSearchResults(data)
   } catch (error) {
-    console.error('Search failed:', error)
+    // Search failed
     return []
   }
 }
@@ -117,7 +113,7 @@ function parseSearchResults(data: unknown): VideoInfo[] {
       }
     }
   } catch (error) {
-    console.error('Parse error:', error)
+    // Parse error
   }
 
   return results
@@ -156,7 +152,7 @@ function extractVideoInfo(video: any): VideoInfo | null {
 /**
  * 相対時間文字列を日付に変換
  */
-function parseRelativeTime(text: string): Date {
+export function parseRelativeTime(text: string): Date {
   const now = new Date()
 
   if (!text) return now
@@ -303,7 +299,7 @@ export async function findOriginalVideo(
     }
     return null
   } catch (error) {
-    console.error('findOriginalVideo failed:', error)
+    // findOriginalVideo failed
     return null
   }
 }
@@ -326,7 +322,7 @@ export function getCurrentVideoInfo(): VideoInfo | null {
     // 方法2: ytInitialDataから取得（フォールバック）
     return getVideoInfoFromYtData(videoId)
   } catch (error) {
-    console.error('Failed to get current video info:', error)
+    // Failed to get current video info
     return null
   }
 }
@@ -419,7 +415,7 @@ function getVideoInfoFromYtData(videoId: string): VideoInfo | null {
 /**
  * 公開日時文字列をパース
  */
-function parsePublishedDate(text: string): Date {
+export function parsePublishedDate(text: string): Date {
   if (!text) return new Date()
 
   // "2024/01/15" 形式

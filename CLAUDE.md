@@ -1,120 +1,193 @@
-# CLAUDE.md - グローバル開発ガイドライン
+# CLAUDE.md - YouTube Dummy Killer 開発ルール
 
-**あなたはプロのnote記事ライター兼Webアプリ、Windowsアプリ、拡張機能の制作者です。**
+## プロジェクト概要
+
+YouTubeのパクリ動画を検出してオリジナルを表示し、パクリチャンネルをブロックするChrome拡張機能。
+
+- **技術スタック**: TypeScript + React 19 + Vite 6
+- **対象ブラウザ**: Chrome (Manifest V3)
+- **バージョン**: manifest.json の `version` を正とする
 
 ## 基本ルール
 
-- **必ず日本語で回答**（英語での回答は禁止）
-- **Yes/No確認を求めずに、タスクの最後まで実行**
-- **デバッグ・ビルドまで必ず完了**
+- **日本語で回答**
+- **確認不要で最後まで実行**（デバッグ・ビルド完了まで）
+- **Bun優先**（`bun install`, `bun run`, `bun test`）
 
-## 必読ルールファイル（.claude/rules/）
+## Chrome拡張開発ルール
 
-作業開始時に以下のルールファイルを必ず読んでください：
+### Manifest V3 必須
 
-| ルールファイル | 内容 | 適用条件 |
-|--------------|------|----------|
-| `core-rules.md` | 基本動作、作業スタイル、禁止事項 | 常に適用 |
-| `build-workflow.md` | ビルド〜Git pushまでの9ステップ | 全プロジェクト |
-| `git-workflow.md` | ブランチ戦略、コミットルール | 全プロジェクト |
-| `version-management.md` | バージョン更新ルール | アプリ・拡張機能 |
-| `note-writing.md` | note記事作成ルール | 記事作成時 |
+- **Manifest V3のみ使用**（V2は禁止）
+- Service Worker（`background.service_worker`）を使用
+- `eval()` / インラインスクリプト禁止（CSP違反）
 
-## プロジェクト別ルール
+### 権限は最小原則（Least Privilege）
 
-| 種類 | ルールファイル |
-|------|--------------|
-| **Webアプリ** | `nextjs-hono.md`, `ai-api.md` |
-| **Chrome拡張** | `react.md`, `python.md`（アイコン作成） |
-| **Windowsアプリ** | `electron.md`, `python.md` |
-| **MCPサーバー** | `mcp-server.md` |
+現在の権限構成（Grok検証済み・最適）:
 
-## 言語別ルール
+```json
+{
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://youtube.com/*"
+  ]
+}
+```
 
-| 言語 | ルールファイル |
-|------|--------------|
-| **Python** | `python.md` |
-| **TypeScript/React** | `react.md`, `TypeScript.md` |
+| 権限 | 理由 | 代替不可の根拠 |
+|------|------|---------------|
+| `storage` | ブロックリスト・設定の永続化 | 必須 |
+| `activeTab` | ポップアップからの一時的タブアクセス | `tabs`より安全 |
+| `host_permissions` (YouTube) | Content Script自動注入・SPA監視 | YouTube限定で最小 |
 
-## 品質管理ルール
+**禁止権限**:
+- `tabs`（全タブアクセス → プライバシー侵害）
+- `<all_urls>`（全サイトアクセス → 過剰）
+- `webRequest` / `webRequestBlocking`（V3非推奨）
+- 不要な `optional_permissions`
 
-| 観点 | ルールファイル |
-|------|--------------|
-| **コードレビュー** | `code-review.md` |
-| **リファクタリング** | `refactoring.md` |
-| **テスト** | `testing.md` |
-| **セキュリティ** | `security-audit.md` |
-| **パフォーマンス** | `performance.md` |
+**権限追加時のルール**:
+1. 本当に必要か再検討
+2. `optional_permissions` で動的要求を優先
+3. CLAUDE.md にルール追加理由を記載
 
-## スキル（スラッシュコマンド）
+### CSP（Content Security Policy）
 
-カスタムスキルは `mnt/skills/README.md` を参照。
+- `'unsafe-inline'` / `'unsafe-eval'` 禁止
+- 外部CDN読み込み禁止（Viteでバンドル）
+- 外部API通信時は `connect-src` を最小限に
+- Chrome DevToolsでCSPエラーを常時監視
 
-| コマンド | 説明 |
-|----------|------|
-| `/commit` | Git操作自動化 |
-| `/review` | コードレビュー |
-| `/deploy` | Cloudflare Workersへデプロイ |
-| `/note` | note記事作成 |
-| `/bun` | Bun全機能 |
+### Content Script 設計
 
-## 開発環境
+#### YouTube SPA対応（MutationObserver戦略）
 
-### 基本ツール
-- **Bun** 1.3.6（優先）
-- Node.js v24.11.1
-- Python 3.14.2
-- Git 2.52.0
+YouTubeはSPAのため、ページ遷移なしでDOMが動的更新される。
 
-### Bun vs Node.js
+```typescript
+// 監視対象を最小限に絞る（document.body全体は禁止）
+const observer = new MutationObserver(
+  debounce((mutations) => {
+    // パクリ検出処理
+  }, 300)
+);
 
-| 用途 | 推奨 |
+// #primary や ytd-video-renderer など最小ターゲット
+observer.observe(targetElement, {
+  childList: true,
+  subtree: true,
+});
+```
+
+**ルール**:
+- `document.body` 全体の監視禁止（パフォーマンス劣化）
+- デバウンス必須（300ms推奨）
+- YouTube URL変更検知: `yt-navigate-finish` イベント活用
+- セレクタはYouTubeのDOM構造変更に備えて定数化
+
+#### パフォーマンス最適化
+
+- Content Scriptは**軽量に保つ**（重い処理はService Workerへ移譲）
+- React を Content Script 内で使わない（バンドルサイズ増大）
+- DOM操作は最小限、バッチで実行
+- `requestIdleCallback` で非クリティカル処理を遅延
+
+### Service Worker（Background）設計
+
+- Service Workerは**アイドル時に終了する**前提で設計
+- 状態は `chrome.storage` に永続化（メモリ保持しない）
+- Port通信の再接続ロジックを必ず実装
+- `chrome.alarms` で定期処理（`setInterval` 禁止）
+
+### メッセージング
+
+- Content Script ↔ Service Worker は `chrome.runtime.sendMessage` / `onMessage`
+- 共有型定義ファイル（`src/types/index.ts`）でメッセージ型を定義
+- `sender.url` でオリジン検証（YouTube以外からのメッセージ拒否）
+- `chrome.runtime.lastError` を必ずチェック
+
+### ストレージ戦略
+
+| データ種別 | ストレージ | 理由 |
+|-----------|-----------|------|
+| ユーザー設定 | `chrome.storage.sync` | デバイス間同期（100KB制限） |
+| ブロックリスト | `chrome.storage.local` | 大容量対応（5MB制限） |
+| 検出キャッシュ | `chrome.storage.local` | 一時データ・高速アクセス |
+
+## ビルド構成
+
+### ビルドコマンド
+
+```bash
+bun run build
+# = tsc && vite build && vite build --config vite.content.config.ts && vite build --config vite.background.config.ts
+```
+
+### 出力先
+
+`YouTube_Dummy_Killer/` フォルダ（`dist/` 禁止）
+
+### ZIP作成
+
+```bash
+cd YouTube_Dummy_Killer && zip -r ../YouTube_Dummy_Killer_v$(cat manifest.json | grep '"version"' | sed 's/.*: "//;s/".*//' ).zip . && cd ..
+```
+
+## ファイル構成
+
+```
+YouTue_Dammy_Killer/
+├── src/
+│   ├── App.tsx                 # ポップアップUI
+│   ├── App.css
+│   ├── main.tsx                # エントリポイント
+│   ├── index.css
+│   ├── background/
+│   │   └── background.ts      # Service Worker
+│   ├── content/
+│   │   ├── content.ts          # Content Script
+│   │   └── content.css
+│   ├── lib/
+│   │   ├── storage.ts          # ストレージユーティリティ
+│   │   └── youtube-api.ts      # YouTube API操作
+│   └── types/
+│       └── index.ts            # 共有型定義
+├── icons/                      # アイコン（16/32/48/128px）
+├── manifest.json               # Manifest V3
+├── index.html                  # ポップアップHTML
+├── vite.config.ts              # Popup ビルド
+├── vite.content.config.ts      # Content Script ビルド
+├── vite.background.config.ts   # Background ビルド
+├── package.json
+├── tsconfig.json
+└── YouTube_Dummy_Killer/       # ビルド出力
+```
+
+## 禁止事項
+
+| 禁止 | 理由 |
 |------|------|
-| パッケージ管理 | `bun install` |
-| スクリプト実行 | `bun run` |
-| テスト | `bun test` |
-| バンドル | `bun build` |
-| Electron | Node.js（Bun非対応） |
+| `eval()` | CSP違反・セキュリティリスク |
+| インラインスクリプト | CSP違反 |
+| `<all_urls>` | 過剰な権限 |
+| APIキーのハードコード | 漏洩リスク |
+| `any` 型の乱用 | 型安全性の崩壊 |
+| `document.body` 全体のMutationObserver | パフォーマンス劣化 |
+| `setInterval` in Service Worker | SW終了時にリーク |
+| 外部CDN読み込み | CSP違反・セキュリティ |
+| ユーザーデータの外部送信 | プライバシー違反 |
 
+## バージョン管理
 
-## ビルドエラーの学習
-
-**同じ過ちは繰り返さない**
-
-1. ビルドエラー発生時は原因を特定・記録
-2. 修正後、同じエラーパターンを今後のコードで予防
-3. エラーパターンをMemory MCPに保存して再発防止
-
-## 開発言語の優先度（Windowsアプリ）
-
-| 優先度 | 言語/フレームワーク | 用途 |
-|--------|---------------------|------|
-| 1 | **Electron** | Web技術でGUI、豊富なnpmエコシステム |
-| 2 | **Tauri** | 軽量バイナリ、Rustバックエンド |
-| 3 | **Python** (PyQt6) | 簡易ツール、AI/ML連携 |
-| 4 | **Rust** (egui) | 純ネイティブGUI、最高性能 |
-| 5 | **C++** (Qt) | 既存C++ライブラリ活用 |
-
-## 開発言語の優先度（その他）
-
-| 優先度 | 言語構成 | 用途 |
-|--------|----------|------|
-| 1 | Hono + TypeScript | Webアプリ |
-| 2 | Python単体 | スクリプト、プロトタイプ |
-| 3 | Rust単体 | 高性能CLI |
-
-## セキュリティ・禁止事項
-
-| 禁止事項 | 理由 |
-|----------|------|
-| APIキー・パスワードのハードコード | 漏洩リスク |
-| `rm -rf /` 等の危険コマンド | システム破壊 |
-| `any`型の乱用 | 型安全性の崩壊 |
-| 1000行超の巨大ファイル | 保守性低下 |
+- `manifest.json` の `version` を正とする
+- 変更時は `package.json` も同期更新
+- コミットメッセージに `v1.x.x` を含める
 
 ## 更新履歴
 
 | 日付 | 内容 |
 |------|------|
-| 2025年12月23日 | **大幅スリム化**（重複削除、ルールファイル参照化） |
-| 2025年12月21日 | スキル・新ルール追加、Bun優先ルール追加 |
+| 2026-02-21 | Grok議論を反映し、Chrome拡張専用ルールに全面改訂 |
+| 2025-12-23 | 初版作成 |

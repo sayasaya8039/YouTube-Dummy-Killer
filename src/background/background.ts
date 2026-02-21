@@ -6,32 +6,42 @@ import {
   updateSettings,
 } from '../lib/storage'
 import { searchVideosFromBackground, findOriginalFromBackground } from '../lib/youtube-api'
-import type { MessageType, MessageResponse } from '../types'
+import type { MessageType, MessageResponse, MessageResponseData } from '../types'
 
 /**
  * メッセージハンドラー
+ * Phase 1: sender.id による送信元検証を追加
  */
 chrome.runtime.onMessage.addListener(
   (
     message: MessageType,
-    _sender: chrome.runtime.MessageSender,
-    sendResponse: (response: MessageResponse) => void
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response: MessageResponse) => void,
   ) => {
+    // Phase 1: 自拡張機能からのメッセージのみ許可
+    if (sender.id !== chrome.runtime.id) {
+      sendResponse({ success: false, error: 'Unauthorized sender' })
+      return true
+    }
+
     handleMessage(message)
       .then((data) => sendResponse({ success: true, data }))
       .catch((error) =>
-        sendResponse({ success: false, error: error.message })
+        sendResponse({
+          success: false,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        }),
       )
 
-    // 非同期レスポンスのためtrueを返す
     return true
-  }
+  },
 )
 
 /**
  * メッセージを処理
+ * Phase 2: 戻り値型を MessageResponseData に厳密化
  */
-async function handleMessage(message: MessageType): Promise<unknown> {
+async function handleMessage(message: MessageType): Promise<MessageResponseData> {
   switch (message.type) {
     case 'BLOCK_CHANNEL':
       await blockChannel(message.channel)
@@ -64,7 +74,8 @@ async function handleMessage(message: MessageType): Promise<unknown> {
 
 /**
  * インストール時の初期化
+ * Phase 3: console.log 除去
  */
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('YouTube Dummy Killer installed')
+  // 初期化処理（ログ出力なし）
 })

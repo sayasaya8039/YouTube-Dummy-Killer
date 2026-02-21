@@ -5,6 +5,7 @@ export default defineConfig({
   build: {
     outDir: 'YouTube_Dummy_Killer',
     emptyOutDir: false,
+    sourcemap: false,
     lib: {
       entry: resolve(__dirname, 'src/background/background.ts'),
       name: 'BackgroundScript',
